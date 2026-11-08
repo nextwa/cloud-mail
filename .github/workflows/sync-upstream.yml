@@ -1,0 +1,51 @@
+name: Sync upstream and deploy
+
+on:
+  schedule:
+    - cron: '17 2 * * *' # 10:17 Asia/Manila; GitHub may delay scheduled runs.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'nextwa/cloud-mail'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Sync fork and explicitly dispatch deployment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const branch = 'main';
+            const before = await github.rest.repos.getBranch({ owner, repo, branch });
+            // GitHub merges upstream without force-pushing or discarding local commits.
+            // Conflicts fail this job so they can be reviewed instead of overwritten.
+            await github.request('POST /repos/{owner}/{repo}/merge-upstream', {
+              owner, repo, branch
+            });
+            const after = await github.rest.repos.getBranch({ owner, repo, branch });
+            const changed = before.data.commit.sha !== after.data.commit.sha;
+            const workflow_id = 'deploy-cloudflare.yml';
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner, repo, workflow_id, branch, per_page: 1
+            });
+            const latest = runs.data.workflow_runs[0];
+            const retry = !latest || (latest.status === 'completed' && latest.conclusion !== 'success');
+            if (changed || retry || context.eventName === 'workflow_dispatch') {
+              // A GITHUB_TOKEN push does not start push workflows. Dispatch explicitly.
+              await github.rest.actions.createWorkflowDispatch({
+                owner, repo, workflow_id, ref: branch
+              });
+              core.summary.addRaw('Upstream synchronized; deployment dispatched. Check the deployment workflow for its result.');
+            } else {
+              core.summary.addRaw('No upstream changes; no deployment needed.');
+            }
+            await core.summary.write();
